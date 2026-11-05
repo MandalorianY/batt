@@ -1,24 +1,21 @@
 package daemon
 
 import (
-	"errors"
 	"log/slog"
 
 	"github.com/charlie0129/batt/pkg/config"
+	"github.com/charlie0129/batt/pkg/powerinfo"
 	"github.com/charlie0129/batt/pkg/smc"
 )
 
 // systemIsCharging reports whether macOS says the battery is charging right
 // now. Firmware and native modes cannot tell from batt's own switch state.
 func (d *Daemon) systemIsCharging() (bool, error) {
-	info, err := d.battery.SystemInfo()
+	battery, err := d.battery.ReadBattery()
 	if err != nil {
 		return false, err
 	}
-	if info == nil || info.IOKit == nil {
-		return false, errors.New("no IOKit battery data available")
-	}
-	return info.IOKit.State.IsCharging, nil
+	return battery.State == powerinfo.Charging, nil
 }
 
 // maintainManagedMagSafeLED reflects actual charging in firmware and native
@@ -64,10 +61,9 @@ func (d *Daemon) maintainManagedMagSafeLED() {
 
 // releaseMagSafeLEDOnExit returns the LED to system control. The SMC keeps
 // the last state batt wrote after the daemon exits, so without this the LED
-// stays green or off even when macOS charges again.
+// stays green or off even when macOS charges again. It runs after maintenance
+// has stopped.
 func (d *Daemon) releaseMagSafeLEDOnExit() error {
-	d.loopMu.Lock()
-	defer d.loopMu.Unlock()
 	if !d.getCapabilities().MagSafeLED || d.conf.ControlMagSafeLED() == config.ControlMagSafeModeDisabled {
 		return nil
 	}

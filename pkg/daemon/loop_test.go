@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -346,6 +347,48 @@ func TestMaintainFirmwareChargeLimitWithoutLegacyPolling(t *testing.T) {
 	}
 	if state := f.smc.firmwareLimit(t); state.Active {
 		t.Fatal("firmware charge limit should be inactive at 100%")
+	}
+}
+
+func TestMaintainAdapterDisable_IdleRestoresSleepWithoutAdapterRead(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		hasHold bool
+	}{
+		{name: "stale hold", hasHold: true},
+		{name: "snapshot from previous run"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, firmwareLegacy, withAdapter(false), withSleepDisabled(!tc.hasHold))
+			if tc.hasHold {
+				if err := f.d.holds.hold(sleepHoldAdapter); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(f.sleepPath(), []byte(`{"previous":false}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before := f.smc.callCount("IsAdapterEnabled")
+			f.sleep.setErr = errors.New("temporary sleep restore failure")
+			f.d.maintainAdapterDisable(time.Now())
+			if _, err := os.Stat(f.sleepPath()); err != nil {
+				t.Fatalf("failed restore must keep the recovery snapshot: %v", err)
+			}
+			if !f.sleep.disabled() || f.holdsSleep(sleepHoldAdapter) != tc.hasHold {
+				t.Fatal("failed restore must preserve sleep state and hold ownership")
+			}
+
+			f.sleep.setErr = nil
+			f.d.maintainAdapterDisable(time.Now())
+			if f.sleep.disabled() || f.holdsSleep(sleepHoldAdapter) {
+				t.Fatal("idle maintenance did not restore sleep")
+			}
+			if _, err := os.Stat(f.sleepPath()); !os.IsNotExist(err) {
+				t.Fatalf("successful restore must remove the snapshot, stat returned %v", err)
+			}
+			if f.smc.callCount("IsAdapterEnabled") != before {
+				t.Fatal("idle maintenance read the adapter with sleep protection off")
+			}
+		})
 	}
 }
 

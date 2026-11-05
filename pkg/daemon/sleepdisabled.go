@@ -436,6 +436,10 @@ func (d *Daemon) adapterSleepPolicyCapable() bool {
 //
 // Reconciliation is serialized by adapterPolicyMu and is idempotent.
 func (d *Daemon) reconcileAdapterSleepPolicy() error {
+	return d.reconcileAdapterSleepPolicyWithRead(true)
+}
+
+func (d *Daemon) reconcileAdapterSleepPolicyWithRead(requireAdapterRead bool) error {
 	d.adapterPolicyMu.Lock()
 	defer d.adapterPolicyMu.Unlock()
 
@@ -443,18 +447,18 @@ func (d *Daemon) reconcileAdapterSleepPolicy() error {
 		return nil
 	}
 
-	adapterEnabled, err := d.smc.IsAdapterEnabled()
-	if err != nil {
-		return fmt.Errorf("failed to check adapter state during sleep reconciliation: %w", err)
-	}
-
 	settingEnabled := d.conf.PreventSleepOnAdapterDisable()
-
-	if !adapterEnabled && settingEnabled {
-		if err := d.holds.hold(sleepHoldAdapter); err != nil {
-			return fmt.Errorf("failed to acquire sleep hold for disabled adapter: %w", err)
+	if requireAdapterRead || settingEnabled {
+		adapterEnabled, err := d.smc.IsAdapterEnabled()
+		if err != nil {
+			return fmt.Errorf("failed to check adapter state during sleep reconciliation: %w", err)
 		}
-		return nil
+		if !adapterEnabled && settingEnabled {
+			if err := d.holds.hold(sleepHoldAdapter); err != nil {
+				return fmt.Errorf("failed to acquire sleep hold for disabled adapter: %w", err)
+			}
+			return nil
+		}
 	}
 
 	if err := d.holds.release(sleepHoldAdapter); err != nil {

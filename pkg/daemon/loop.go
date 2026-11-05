@@ -57,12 +57,12 @@ func (d *Daemon) maintainAdapterDisable(now time.Time) bool {
 	d.transitionMu.Lock()
 	defer d.transitionMu.Unlock()
 
-	if err := d.reconcileAdapterSleepPolicy(); err != nil {
+	conf := d.conf
+	until := conf.AdapterDisableUntil()
+	if err := d.reconcileAdapterSleepPolicyWithRead(!until.IsZero()); err != nil {
 		slog.Error("failed to reconcile adapter sleep policy", "error", err)
 	}
 
-	conf := d.conf
-	until := conf.AdapterDisableUntil()
 	if until.IsZero() {
 		return false
 	}
@@ -324,7 +324,7 @@ func (d *Daemon) cancelCalibrationForPermanentDisable() {
 	d.cancelCalibrationNoRestoreNoError()
 }
 
-func (d *Daemon) handleChargingLogic(ignoreMissedLoops, isChargingEnabled, isPluggedIn bool, batteryCharge, lower, upper int) bool {
+func (d *Daemon) handleChargingLogic(ignoreMissedLoops, isChargingEnabled bool, batteryCharge, lower, upper int) bool {
 	maintainLoopsMissed := !ignoreMissedLoops && d.checkMissedMaintainLoops(false)
 
 	// Fix for #123.
@@ -493,7 +493,7 @@ func (d *Daemon) maintainManagedChargeLimit() bool {
 		slog.Debug("requested native charge target; registration may still be pending", "lower", lower, "upper", upper)
 	case changed:
 		slog.Info(fmt.Sprintf("reconciled %s charge limit", mode), "lower", lower, "upper", upper)
-	default:
+	case slog.Default().Enabled(context.Background(), logging.LevelTrace):
 		logging.Trace(fmt.Sprintf("%s charge limit is correct", mode), "lower", lower, "upper", upper)
 	}
 	d.maintainedChargingInProgress = false
@@ -601,7 +601,7 @@ func (d *Daemon) maintainActiveCharging(ignoreMissedLoops bool) bool {
 	// so charging starts right away instead of waiting for the charge to fall
 	// below the lower limit, and stops exactly at the target.
 	if chargeOnceTarget > 0 && batteryCharge < chargeOnceTarget {
-		return d.handleChargingLogic(ignoreMissedLoops, isChargingEnabled, isPluggedIn, batteryCharge, chargeOnceTarget, chargeOnceTarget)
+		return d.handleChargingLogic(ignoreMissedLoops, isChargingEnabled, batteryCharge, chargeOnceTarget, chargeOnceTarget)
 	}
 
 	// If maintain is disabled, we don't care about the battery charge, enable charging anyway.
@@ -618,7 +618,7 @@ func (d *Daemon) maintainActiveCharging(ignoreMissedLoops bool) bool {
 		return true
 	}
 
-	return d.handleChargingLogic(ignoreMissedLoops, isChargingEnabled, isPluggedIn, batteryCharge, lower, upper)
+	return d.handleChargingLogic(ignoreMissedLoops, isChargingEnabled, batteryCharge, lower, upper)
 }
 
 func (d *Daemon) updateMagSafeLed(isChargingEnabled bool) {

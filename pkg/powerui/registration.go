@@ -13,6 +13,8 @@ import (
 
 // Registrations reads powerd independently of PowerUI's feature flag. Do not
 // treat a failed command or an unfamiliar output format as an empty policy list.
+// pmset has Apple's private charge-limit entitlement. The underlying IOKit
+// call can return no records to an unentitled client even when run as root.
 func (nativeBridge) Registrations() (targets []int, manual bool, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
