@@ -3,6 +3,7 @@ package daemon
 import (
 	"github.com/peterneutron/powerkit-go/pkg/powerkit"
 
+	"github.com/charlie0129/batt/pkg/powerinfo"
 	"github.com/charlie0129/batt/pkg/powerui"
 	"github.com/charlie0129/batt/pkg/smc"
 )
@@ -23,6 +24,10 @@ func darwinSystem(conn *smc.AppleSMC) System {
 // darwinBatteryInfo reads battery telemetry through IOKit (powerkit-go) and
 // the native charge-limit override through PowerUI.
 type darwinBatteryInfo struct{}
+
+func (darwinBatteryInfo) ReadBattery() (*powerinfo.Battery, error) {
+	return powerinfo.ReadBattery()
+}
 
 func (darwinBatteryInfo) SystemInfo() (*powerkit.SystemInfo, error) {
 	return powerkit.GetSystemInfo(powerkit.FetchOptions{QueryIOKit: true, QuerySMC: false})

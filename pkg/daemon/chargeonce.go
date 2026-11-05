@@ -140,6 +140,36 @@ func (d *Daemon) startChargeOnce(target int) error {
 	return nil
 }
 
+// reapplyNativeChargeOnce resumes charging by reapplying the native target.
+func (d *Daemon) reapplyNativeChargeOnce(target int) error {
+	if target <= 0 || target >= 100 || !d.getCapabilities().NativeExactTargets {
+		return nil
+	}
+	d.loopMu.Lock()
+	defer d.loopMu.Unlock()
+	if d.chargeControlStopped {
+		return errors.New("charge control has stopped")
+	}
+	charge, err := d.smc.GetBatteryCharge()
+	if err != nil {
+		return fmt.Errorf("read battery charge before restarting one-time charge: %w", err)
+	}
+	if charge >= target {
+		return nil
+	}
+	return d.native.SetLimit(target)
+}
+
+func (d *Daemon) resumeNativeChargeOnce() {
+	if !d.getCapabilities().NativeExactTargets {
+		return
+	}
+	d.completeChargeOnce()
+	if err := d.reapplyNativeChargeOnce(d.activeChargeOnceTarget()); err != nil {
+		slog.Error("failed to resume native one-time charge after restart", "error", err)
+	}
+}
+
 // reportChargeOnceStarted runs only after the immediate enforcement succeeds.
 func (d *Daemon) reportChargeOnceStarted(target, charge int) {
 	slog.Info("started a one-time charge",

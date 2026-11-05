@@ -1,37 +1,72 @@
 package daemon
 
 import (
+	"errors"
 	"net/http"
-	"strings"
+	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/charlie0129/batt/pkg/compatibility"
 )
 
-func TestExactNativeChargeNowIsRejected(t *testing.T) {
-	f := newExactNativeFixture(t, withCharge(52))
-	f.file.SetUpperLimit(55)
-	f.file.SetLowerLimit(50)
+func TestNativeChargeNowReappliesTargetOnce(t *testing.T) {
+	for _, target := range []int{67, 99} {
+		t.Run(strconv.Itoa(target), func(t *testing.T) {
+			f := newExactNativeFixture(t, withCharge(target-1))
+			f.file.SetUpperLimit(target)
+			lower := f.file.LowerLimit()
+			f.native.limit, f.native.enabled = target, true
+			response := f.post(chargeOnceLimitPath)
+			want := []int{target}
+			if response.Code != http.StatusCreated || f.file.ChargeOnceTarget() != target ||
+				!slices.Equal(f.native.setCalls, want) || f.native.limit != target || !f.native.enabled {
+				t.Fatalf("native reapply failed: %d %s native=%+v", response.Code, response.Body.String(), f.native)
+			}
+			reloaded := f.reloadFile()
+			if reloaded.UpperLimit() != target || reloaded.LowerLimit() != lower || reloaded.ChargeOnceTarget() != target {
+				t.Fatal("native reapply changed the saved charge limits")
+			}
+			if !f.d.maintainLoopForced() || !slices.Equal(f.native.setCalls, want) {
+				t.Fatal("maintenance reapplied an unchanged target", f.native.setCalls)
+			}
+			f.smc.setCharge(t, target)
+			if !f.d.completeChargeOnce() || !f.d.maintainLoopForced() || f.native.limit != target || !slices.Equal(f.native.setCalls, want) {
+				t.Fatal("completion did not retain the original ceiling", f.native.setCalls)
+			}
+		})
+	}
+}
 
-	response := f.post("/charge-once/limit")
-	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), ErrNativeChargeNow.Error()) {
-		t.Fatalf("native charge now must be rejected: %d %s", response.Code, response.Body.String())
+func TestNativeChargeNowWriteFailureRollsBackAction(t *testing.T) {
+	f := newExactNativeFixture(t, withCharge(62))
+	f.file.SetUpperLimit(67)
+	f.native.limit, f.native.enabled, f.native.err = 67, true, errors.New("native write failed")
+	response := f.post(chargeOnceLimitPath)
+	if response.Code != http.StatusInternalServerError || f.file.ChargeOnceTarget() != 0 || f.file.UpperLimit() != 67 || f.native.limit != 67 || !f.native.enabled {
+		t.Fatalf("failed reapply changed the target or left a running action: %d %s native=%+v", response.Code, response.Body.String(), f.native)
 	}
-	if f.file.ChargeOnceTarget() != 0 || f.file.UpperLimit() != 55 || f.file.LowerLimit() != 50 || len(f.native.setCalls) != 0 || f.native.disables != 0 {
-		t.Fatalf("rejected charge now changed the configuration or native limit: target=%d native=%+v", f.file.ChargeOnceTarget(), f.native)
+}
+
+func TestNativeChargeNowAfterShutdownDoesNotWrite(t *testing.T) {
+	f := newExactNativeFixture(t, withCharge(62))
+	f.file.SetUpperLimit(67)
+	if err := f.d.stopChargeControl(); err != nil {
+		t.Fatal(err)
 	}
-	if f.d.maintainManagedChargeOnce(55) || len(f.native.setCalls) != 0 || f.native.disables != 0 {
-		t.Fatalf("native maintenance must reject charge now without changing the limit: %+v", f.native)
+	response := f.post(chargeOnceLimitPath)
+	if response.Code != http.StatusInternalServerError || len(f.native.setCalls) != 0 || f.file.ChargeOnceTarget() != 0 {
+		t.Fatalf("shutdown accepted or applied a one-time charge: %d %s writes=%v", response.Code, response.Body.String(), f.native.setCalls)
 	}
 }
 
 func TestExactNativeChargeOnceRestartRecovery(t *testing.T) {
 	for _, tc := range []struct {
-		name         string
-		target, want int
+		name   string
+		target int
 	}{
-		{name: "charge now is cleared", target: 55, want: 0},
-		{name: "charge full is preserved", target: 100, want: 100},
+		{name: "charge now is reapplied", target: 55},
+		{name: "charge full is preserved", target: 100},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newExactNativeFixture(t, withCharge(52))
@@ -41,13 +76,43 @@ func TestExactNativeChargeOnceRestartRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			f.d.disableUnsupportedConfiguredFeatures()
-			reloaded := f.reloadFile()
-			if f.file.ChargeOnceTarget() != tc.want || reloaded.ChargeOnceTarget() != tc.want {
-				t.Fatalf("restart target=%d: in memory=%d, on disk=%d, want=%d", tc.target, f.file.ChargeOnceTarget(), reloaded.ChargeOnceTarget(), tc.want)
+			f.d.conf = f.reloadFile()
+			if err := f.d.start(f.dir); err != nil {
+				t.Fatal(err)
 			}
-			if !f.d.maintainLoopForced() || f.native.enabled != (tc.want == 0) || (tc.want == 0 && f.native.limit != 55) {
-				t.Fatalf("restart did not apply the supported target: target=%d native=%+v", tc.want, f.native)
+			if f.d.conf.ChargeOnceTarget() != tc.target || f.reloadFile().ChargeOnceTarget() != tc.target {
+				t.Fatal("restart discarded the saved one-time target")
+			}
+			if !f.d.maintainLoopForced() || f.native.enabled != (tc.target < 100) ||
+				(tc.target < 100 && (f.native.limit != tc.target || !slices.Equal(f.native.setCalls, []int{tc.target}))) {
+				t.Fatalf("restart did not apply the saved one-time target: target=%d native=%+v", tc.target, f.native)
+			}
+		})
+	}
+}
+
+func TestNativeRestartDoesNotReapplyCompletedOrUnknownCharge(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		saveErr    error
+		readErr    error
+		wantTarget int
+	}{
+		{name: "completed"},
+		{name: "save failed", saveErr: errors.New("save failed"), wantTarget: 67},
+		{name: "read failed", readErr: errors.New("charge unavailable"), wantTarget: 67},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conf := newMemConfig()
+			conf.SetUpperLimit(67)
+			conf.SetChargeOnceTarget(67)
+			conf.failSave(tc.saveErr)
+			f := newExactNativeFixture(t, withConfig(conf), withCharge(67))
+			f.native.limit, f.native.enabled = 67, true
+			f.smc.fail("GetBatteryCharge", tc.readErr)
+			f.d.resumeNativeChargeOnce()
+			if conf.ChargeOnceTarget() != tc.wantTarget || len(f.native.setCalls) != 0 {
+				t.Fatalf("restart target=%d, native writes=%v", conf.ChargeOnceTarget(), f.native.setCalls)
 			}
 		})
 	}

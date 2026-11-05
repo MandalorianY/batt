@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"errors"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	"github.com/charlie0129/batt/pkg/calibration"
 	"github.com/charlie0129/batt/pkg/compatibility"
 	"github.com/charlie0129/batt/pkg/config"
+	"github.com/charlie0129/batt/pkg/powerinfo"
 	"github.com/charlie0129/batt/pkg/smc"
 )
 
@@ -569,6 +572,31 @@ func (f *fakeBatteryInfo) SystemInfo() (*powerkit.SystemInfo, error) {
 	return f.info, f.err
 }
 
+func (f *fakeBatteryInfo) ReadBattery() (*powerinfo.Battery, error) {
+	info, err := f.SystemInfo()
+	if err != nil {
+		return nil, err
+	}
+	if info == nil || info.IOKit == nil {
+		return nil, errors.New("no IOKit battery data available")
+	}
+	state := powerinfo.Discharging
+	switch {
+	case info.IOKit.State.FullyCharged:
+		state = powerinfo.Full
+	case info.IOKit.State.IsCharging:
+		state = powerinfo.Charging
+	}
+	battery := info.IOKit.Battery
+	return &powerinfo.Battery{
+		State:          state,
+		DesignCapacity: battery.DesignCapacity,
+		MaxCapacity:    battery.MaxCapacity,
+		ChargeRate:     int(math.Round(battery.Voltage * battery.Amperage * 1000)),
+		DesignVoltage:  battery.Voltage,
+	}, nil
+}
+
 func (f *fakeBatteryInfo) FullChargeOverride() (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -625,6 +653,9 @@ func (f *fakeNativeLimit) AvailableLimits() ([]int, error) {
 func (f *fakeNativeLimit) Limit() (int, bool, error) {
 	if f.err != nil {
 		return 0, false, f.err
+	}
+	if f.exact && f.registered && !f.enabled {
+		return 0, true, nil
 	}
 	return f.limit, f.enabled, nil
 }

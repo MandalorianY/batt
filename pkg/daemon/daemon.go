@@ -66,6 +66,7 @@ type Daemon struct {
 	// holdMaintainLoop.
 	loopDelay               sync.WaitGroup
 	loopInterval            time.Duration
+	loopRequested           chan struct{}
 	loopRecorder            *TimeSeriesRecorder
 	continuousLoopThreshold time.Duration
 	// preSleepLoopDelay is how long the loop pauses after charging was
@@ -102,6 +103,7 @@ func New(conf config.Config, sys System) *Daemon {
 		euid:       os.Geteuid,
 
 		loopInterval:            loopInterval,
+		loopRequested:           make(chan struct{}, 1),
 		loopRecorder:            NewTimeSeriesRecorder(60, loopInterval),
 		continuousLoopThreshold: 1*time.Minute + 20*time.Second, // add 20s to be sure
 		preSleepLoopDelay:       60 * time.Second,
@@ -241,6 +243,7 @@ func (d *Daemon) start(stateDir string) error {
 	if err := d.ensureStartupSleepPolicy(); err != nil {
 		return err
 	}
+	d.resumeNativeChargeOnce()
 
 	// Load persisted schedule from config
 	if cronExpr := d.conf.Cron(); d.getCapabilities().Calibration && cronExpr != "" {
@@ -436,7 +439,7 @@ func (d *Daemon) reconcileStartupSleepPolicy() error {
 // LED back to macOS before the SMC connection is closed.
 func (d *Daemon) releaseHardwareOnExit() error {
 	var cleanupErr error
-	if err := d.releaseChargeControlOnExit(); err != nil {
+	if err := d.stopChargeControl(); err != nil {
 		slog.Error("failed to reset charge control before exiting", "error", err)
 		cleanupErr = errors.Join(cleanupErr, err)
 	}

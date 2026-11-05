@@ -195,7 +195,7 @@ func (d *Daemon) disableUnsupportedConfiguredFeatures() {
 		changed = true
 	}
 	if target := conf.ChargeOnceTarget(); target != 0 && (!caps.ChargingControl ||
-		(caps.ChargeControlMode == compatibility.ChargeControlNative && target < 100)) {
+		(caps.ChargeControlMode == compatibility.ChargeControlNative && !caps.NativeExactTargets && target < 100)) {
 		conf.ClearChargeOnceTarget()
 		changed = true
 	}

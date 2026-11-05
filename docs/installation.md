@@ -59,7 +59,7 @@ You can choose either one. Please do not use both at the same time to avoid conf
 - Test if it works by running `sudo batt status`. If you see your battery status, you are good to go!
 - Time to customize. By default `batt` will set a charge limit to 60%. For example, to set the charge limit to 80%, run `sudo batt limit 80`.
 - As said before, it is _highly_ recommended to disable macOS's optimized charging when using `batt`. To do so, open `System Settings` -> `Battery` -> `Battery Health` -> `i` -> Turn OFF `Optimized Battery Charging`. Disable the built-in charge limit when using direct SMC control. In native mode, `batt` manages that setting itself.
-- If your current charge is above the limit, behavior depends on the detected backend. Legacy control stops charging and keeps running from the wall. Firmware-managed and native control may drain the battery toward the target even while plugged in; native control can also temporarily charge fully under a macOS override.
+- Above the limit, legacy control and macOS 27 native control stop further charging without requesting discharge. Firmware-managed and older native control may drain the battery toward the target. Apple's full-charge override still applies in native mode.
 - You can refer to [Usage](usage.md) for additional configurations. Don't know what a command does? Run `batt help` to see all available commands. To see help for a specific command, run `batt help <command>`.
 - To disable the charge limit, run `batt disable` or `batt limit 100`.
 - [How to uninstall?](faq.md#how-to-uninstall) [How to upgrade?](faq.md#how-to-upgrade)

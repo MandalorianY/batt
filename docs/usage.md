@@ -9,6 +9,8 @@
 
 Set a maximum charge target. In native mode, macOS controls enforcement timing and full-charge overrides.
 
+The native limit message estimates when charging may resume at five percentage points below the ceiling. With a 50% ceiling, it shows around 45%. macOS decides the actual restart point.
+
 Setting the limit to 10-99 will enable the battery charge limit, limiting the maximum charge to _somewhere around_ your setting. However, setting the limit to 100 will disable the battery charge limit.
 
 By default, `batt` will set a 60% charge limit.
@@ -23,7 +25,7 @@ To disable the limit only temporarily, use `batt disable --for=1d`. Your current
 
 Charge the battery once without changing your charge limit.
 
-- `batt charge now` starts charging right away and stops at your upper limit. Normally `batt` waits until the charge drops below the lower limit, so this is how you top up from inside that gap.
+- `batt charge now` requests a top-up to your upper limit. In modes with a lower limit, this lets you top up from inside the gap.
 - `batt charge full` charges to 100% once. Your limit applies again as soon as the battery is full.
 - `batt charge cancel` stops a running one-time charge.
 
@@ -33,7 +35,7 @@ A one-time charge and a disabled power adapter exclude each other, because cutti
 
 In firmware-managed mode, `batt charge now` hands the firmware the narrowest range that ends at your limit, and the firmware does not start charging from the top of that range. A one-time charge to the limit can therefore finish one percent short of it. `batt charge full` is exact, because it deactivates the limit instead of narrowing it.
 
-Native mode does not support `batt charge now`, because macOS controls when charging resumes. `batt charge full` temporarily releases the native limit, then restores it at 100%. In adapter mode, both one-time actions use the adapter to control charging.
+On macOS 27, `batt charge now` reapplies the native ceiling when the battery is below it. macOS decides when charging resumes. `batt charge full` works on both native backends by temporarily releasing the limit and restoring it at 100%. In adapter mode, both one-time actions use the adapter to control charging.
 
 The GUI exposes the same actions in the menubar as **Charge to 70% Now** and **Charge to Full Once**, with the current progress and a **Cancel One-Time Charge** item while one is running.
 

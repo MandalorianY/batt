@@ -134,7 +134,7 @@ batt help
 ### Special Notes
 
 - macOS 27 Beta 1–3: Firmware-managed charge limits. Limits remain active during sleep.
-- macOS 27 Beta 4+: Native macOS charge limits from 10% to 99% by default. Upper limit only; macOS may drain the battery toward the limit while plugged in. Opt-in adapter mode adds a lower limit.
+- macOS 27 Beta 4+: Native charge ceilings from 10% to 99% by default, without requesting discharge. Opt-in adapter mode adds a configurable lower limit.
 
 ### Adapter Mode
 
@@ -180,7 +180,7 @@ You can think of `batt` like `docker`. It has a daemon that runs in the backgrou
 
 For example, when you run `sudo batt limit 80`, the client will send the requirement to the daemon, and the daemon will do its job to keep the charge limit to 80%.
 
-The daemon selects a control backend from usable SMC keys and native services. The legacy backend continuously reads battery percentage and toggles charging itself. The firmware backend writes lower/upper limits and periodically reconciles them while Apple firmware enforces the range, including during sleep. The native backend keeps PowerUIAgent's upper target in sync; opt-in adapter mode toggles wall power. The same capability data is exposed to CLI and GUI clients so unsupported features are not offered.
+The daemon selects a control backend from usable SMC keys and native services. The legacy backend continuously reads battery percentage and toggles charging itself. The firmware backend writes lower/upper limits and periodically reconciles them while Apple firmware enforces the range, including during sleep. The macOS 27 native backend registers a ceiling with `powerd`. Opt-in adapter mode toggles wall power. The same capability data is exposed to CLI and GUI clients so unsupported features are not offered.
 
 ## Motivation
 

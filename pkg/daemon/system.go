@@ -5,6 +5,7 @@ import (
 	"github.com/peterneutron/powerkit-go/pkg/powerkit"
 
 	"github.com/charlie0129/batt/pkg/compatibility"
+	"github.com/charlie0129/batt/pkg/powerinfo"
 	"github.com/charlie0129/batt/pkg/powerui"
 	"github.com/charlie0129/batt/pkg/smc"
 )
@@ -83,6 +84,8 @@ type SleepNotifier interface {
 
 // BatteryInfo reads battery telemetry the SMC does not expose.
 type BatteryInfo interface {
+	// ReadBattery reads the latest battery sample directly from IOKit.
+	ReadBattery() (*powerinfo.Battery, error)
 	// SystemInfo returns an IOKit snapshot of the battery and the adapter.
 	SystemInfo() (*powerkit.SystemInfo, error)
 	// FullChargeOverride reports whether macOS is charging to full once,

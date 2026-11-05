@@ -23,6 +23,17 @@ func newExactNativeFixture(t *testing.T, opts ...fixtureOption) *fixture {
 	return f
 }
 
+func (f *fixture) runRequestedMaintenance() bool {
+	f.t.Helper()
+	select {
+	case <-f.d.loopRequested:
+		return f.d.maintainLoopForced()
+	default:
+		f.t.Fatal("saved native target did not wake the daemon loop")
+		return false
+	}
+}
+
 func TestDetectCapabilitiesPrefersAdapterWhenOptedIn(t *testing.T) {
 	f := newFixture(t, firmwareGated, withFileConfig(), withNative(sliderNative(80, 90, 100)))
 	f.file.SetAdapterMode(true)
@@ -317,7 +328,7 @@ func TestNativeExactLimitsAreAppliedWithoutAdapterControl(t *testing.T) {
 		t.Run(strconv.Itoa(target), func(t *testing.T) {
 			f := newExactNativeFixture(t)
 			response := f.put("/limit", strconv.Itoa(target))
-			if response.Code != http.StatusCreated || f.native.limit != target || !f.native.enabled {
+			if response.Code != http.StatusAccepted || !f.runRequestedMaintenance() || f.native.limit != target || !f.native.enabled {
 				t.Fatalf("target %d: status=%d body=%s native=%+v", target, response.Code, response.Body.String(), f.native)
 			}
 			f.d.disableUnsupportedConfiguredFeatures()
@@ -331,14 +342,21 @@ func TestNativeExactLimitsAreAppliedWithoutAdapterControl(t *testing.T) {
 	}
 }
 
-func TestSetNativeLimitReportsApplicationFailure(t *testing.T) {
+func TestSetNativeLimitRetainsTargetForBackgroundRetry(t *testing.T) {
 	f := newExactNativeFixture(t)
 	f.native.err = errors.New("agent unavailable")
 	response := f.put("/limit", "69")
-	if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), "applying it failed") {
-		t.Fatalf("failed apply reported as success: %d %s", response.Code, response.Body.String())
+	if response.Code != http.StatusAccepted || len(f.native.setCalls) != 0 {
+		t.Fatalf("request waited for native apply: %d %s", response.Code, response.Body.String())
 	}
 	if f.file.UpperLimit() != 69 {
 		t.Fatal("saved target lost; daemon must be able to retry it")
+	}
+	if f.runRequestedMaintenance() {
+		t.Fatal("background application failure was ignored")
+	}
+	f.native.err = nil
+	if !f.d.maintainLoopForced() || f.native.limit != 69 || !f.native.enabled {
+		t.Fatal("background application was not retried")
 	}
 }

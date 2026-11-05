@@ -7,13 +7,49 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestNativeLimitReturnsWhileMaintenanceIsBusy(t *testing.T) {
+	for _, latest := range []int{60, 100} {
+		t.Run(strconv.Itoa(latest), func(t *testing.T) {
+			f := newExactNativeFixture(t)
+			f.native.limit, f.native.enabled = 55, true
+			f.d.loopMu.Lock()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for _, target := range []int{50, latest} {
+					r := f.put("/limit", strconv.Itoa(target))
+					if r.Code != http.StatusAccepted {
+						t.Errorf("target %d was not accepted: %d %s", target, r.Code, r.Body.String())
+					}
+				}
+			}()
+			select {
+			case <-done:
+				f.d.loopMu.Unlock()
+			case <-time.After(time.Second):
+				f.d.loopMu.Unlock()
+				<-done
+				t.Fatal("limit request waited for busy maintenance")
+			}
+			if f.file.UpperLimit() != latest || len(f.native.setCalls) != 0 || f.native.disables != 0 {
+				t.Fatal("requests were not saved and coalesced without touching the backend")
+			}
+			if !f.runRequestedMaintenance() || f.native.limit != latest || f.native.enabled != (latest < 100) {
+				t.Fatal("background maintenance did not apply the latest target")
+			}
+		})
+	}
+}
 
 func TestNativeLimitUsesConfiguredTargetRegardlessOfCharge(t *testing.T) {
 	for _, tc := range []struct {
 		name                     string
 		charge, target, previous int
 	}{
+		{"above no-drain ceiling", 64, 50, 50},
 		{"full battery", 100, 97, 100},
 		{"above limit paused", 70, 55, 70},
 		{"above limit charging", 70, 55, 80},
@@ -28,13 +64,10 @@ func TestNativeLimitUsesConfiguredTargetRegardlessOfCharge(t *testing.T) {
 			f := newExactNativeFixture(t, withCharge(tc.charge))
 			f.native.limit, f.native.enabled = tc.previous, tc.previous < 100
 			r := f.put("/limit", strconv.Itoa(tc.target))
-			if r.Code != http.StatusCreated || f.native.limit != tc.target || !f.native.enabled {
+			if r.Code != http.StatusAccepted || !f.runRequestedMaintenance() || f.native.limit != tc.target || !f.native.enabled {
 				t.Fatalf("limit not applied: %d %s native=%+v", r.Code, r.Body.String(), f.native)
 			}
-			wantMessage := fmt.Sprintf("set charging limit to %d%%, current charge: %d%%. macOS resumes charging once the battery drops about 5%% below the limit.", tc.target, tc.charge)
-			if tc.charge > tc.target {
-				wantMessage += " Current charge is above the limit; macOS may use battery power to discharge toward the target."
-			}
+			wantMessage := fmt.Sprintf("set upper charging limit to %d%%, current charge: %d%%. Estimated charging restart around %d%% (5 percentage points below the limit).", tc.target, tc.charge, tc.target-5)
 			if strings.TrimSpace(r.Body.String()) != strconv.Quote(wantMessage) || f.file.UpperLimit() != tc.target {
 				t.Fatalf("unexpected native limit response or saved target: %s target=%d", r.Body.String(), f.file.UpperLimit())
 			}
@@ -78,7 +111,7 @@ func TestNativeMinimumTargetIgnoresSavedLowerLimitDelta(t *testing.T) {
 	f.file.SetUpperLimit(80)
 	f.file.SetLowerLimit(30)
 	r := f.put("/limit", "10")
-	if r.Code != http.StatusCreated || f.native.limit != 10 || f.file.UpperLimit() != 10 {
+	if r.Code != http.StatusAccepted || !f.runRequestedMaintenance() || f.native.limit != 10 || f.file.UpperLimit() != 10 {
 		t.Fatalf("saved delta blocked minimum native target: %d %s", r.Code, r.Body.String())
 	}
 }

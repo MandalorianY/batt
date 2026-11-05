@@ -47,7 +47,7 @@ func (d *Daemon) ensureManagedChargeLimitDisabled() (bool, error) {
 
 // ensureNativeChargeLimit keeps the macOS charge limit at the configured
 // upper limit. Older native backends only offer a fixed set of slider values;
-// macOS 27's preference path accepts exact percentages. The supported-value
+// macOS 27's ceiling policy accepts exact percentages. The supported-value
 // check is a safety net that never lowers the user's requested target.
 func (d *Daemon) ensureNativeChargeLimit(upper int) (bool, error) {
 	caps := d.getCapabilities()
@@ -78,11 +78,9 @@ func (d *Daemon) ensureNativeChargeLimitDisabled() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if !enabled && !d.native.SupportsExactTargets() {
+	if !enabled {
 		return false, nil
 	}
-	// The agent can say disabled while powerd still has its registration.
-	// The client checks that independently and makes clean releases no-ops.
 	return enabled, d.native.Disable()
 }
 
@@ -99,17 +97,6 @@ func (d *Daemon) resetChargeControl() error {
 	default:
 		return d.smc.ResetChargeControl()
 	}
-}
-
-func (d *Daemon) releaseChargeControlOnExit() error {
-	caps := d.getCapabilities()
-	if caps.NativeExactTargets {
-		return d.stopChargeControl()
-	}
-	if caps.ChargingControl {
-		return d.resetChargeControl()
-	}
-	return nil
 }
 
 // stopChargeControl waits for an in-flight maintenance pass, prevents queued

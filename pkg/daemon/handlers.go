@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net/http"
 	"time"
 
@@ -104,14 +103,15 @@ func (d *Daemon) setLimit(w http.ResponseWriter, r *http.Request) {
 	charge, err := d.smc.GetBatteryCharge()
 	switch {
 	case caps.ChargeControlMode == compatibility.ChargeControlNative:
-		msg = fmt.Sprintf("set charging limit to %d%%", l)
+		msg = fmt.Sprintf("set upper charging limit to %d%%", l)
 		if err == nil {
 			msg += fmt.Sprintf(", current charge: %d%%", charge)
 		}
-		msg += ". macOS resumes charging once the battery drops about 5% below the limit."
-		if err == nil && charge > l {
-			msg += " Current charge is above the limit; macOS may use battery power to discharge toward the target."
+		if err == nil && charge > l && !caps.NativeExactTargets {
+			msg += ". macOS may use battery power to discharge toward the limit"
 		}
+		// Estimate the restart point using Apple's five-point gap.
+		msg += fmt.Sprintf(". Estimated charging restart around %d%% (5 percentage points below the limit).", l-5)
 	case err != nil:
 		msg = fmt.Sprintf("set upper/lower charging limit to %d%%/%d%%", conf.UpperLimit(), conf.LowerLimit())
 	default:
@@ -132,12 +132,16 @@ func (d *Daemon) setLimit(w http.ResponseWriter, r *http.Request) {
 		msg = "set charging limit to 100%. batt will not control charging anymore."
 	}
 
-	// Immediate single maintain loop, to avoid waiting for the next loop
-	if applied := d.maintainLoopForced(); !applied && caps.NativeExactTargets {
-		err := fmt.Errorf("limit %d%% was saved, but applying it failed; inspect the daemon log and battery status", l)
-		d.fail(w, http.StatusInternalServerError, err)
+	if caps.NativeExactTargets {
+		// Coalesce changes while powerd restarts; the loop reads the latest target.
+		select {
+		case d.loopRequested <- struct{}{}:
+		default:
+		}
+		writeJSON(w, http.StatusAccepted, msg)
 		return
 	}
+	d.maintainLoopForced()
 
 	writeJSON(w, http.StatusCreated, msg)
 }
@@ -486,38 +490,11 @@ func (d *Daemon) getCharging(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) getBatteryInfo(w http.ResponseWriter, r *http.Request) {
-	// IOKit alone is sufficient here.
-	info, err := d.battery.SystemInfo()
-	if err != nil || info == nil || info.IOKit == nil {
-		if err == nil {
-			err = errors.New("no IOKit data available")
-		}
+	resp, err := d.battery.ReadBattery()
+	if err != nil {
 		slog.Error("getBatteryInfo failed", "error", err)
 		d.fail(w, http.StatusInternalServerError, err)
 		return
-	}
-
-	// Map powerkit-go data to our backwards-compatible Battery structure
-	var state powerinfo.BatteryState
-	switch {
-	case info.IOKit.State.FullyCharged:
-		state = powerinfo.Full
-	case info.IOKit.State.IsCharging:
-		state = powerinfo.Charging
-	default:
-		state = powerinfo.Discharging
-	}
-
-	// Compute charge rate (mW) using native amperage sign from IOKit
-	powerW := info.IOKit.Battery.Voltage * info.IOKit.Battery.Amperage
-	chargeRateMilliW := int(math.Round(powerW * 1000.0))
-
-	resp := powerinfo.Battery{
-		State:          state,
-		DesignCapacity: info.IOKit.Battery.DesignCapacity,
-		MaxCapacity:    info.IOKit.Battery.MaxCapacity,
-		ChargeRate:     chargeRateMilliW,
-		DesignVoltage:  info.IOKit.Battery.Voltage,
 	}
 	if d.getCapabilities().ChargeControlMode == compatibility.ChargeControlNative {
 		if active, err := d.battery.FullChargeOverride(); err == nil {
@@ -590,19 +567,20 @@ func (d *Daemon) setControlMagSafeLED(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d.conf.SetControlMagSafeLED(mode)
-	if err := d.conf.Save(); err != nil {
-		slog.Error("saveConfig failed", "error", err)
-		d.fail(w, http.StatusInternalServerError, err)
-		return
-	}
-
 	if d.isManagedChargeControl() && mode == config.ControlMagSafeModeDisabled {
 		if err := d.smc.SetMagSafeLedState(smc.LEDSystem); err != nil {
 			slog.Error("failed to return MagSafe LED control to the system", "error", err)
 			d.fail(w, http.StatusInternalServerError, err)
 			return
 		}
+	}
+	previous := d.conf.ControlMagSafeLED()
+	d.conf.SetControlMagSafeLED(mode)
+	if err := d.conf.Save(); err != nil {
+		d.conf.SetControlMagSafeLED(previous)
+		slog.Error("saveConfig failed", "error", err)
+		d.fail(w, http.StatusInternalServerError, err)
+		return
 	}
 
 	slog.Info(fmt.Sprintf("set control MagSafe LED to %s", mode))
@@ -841,8 +819,9 @@ func (d *Daemon) startChargeOnceRequest(w http.ResponseWriter, r *http.Request, 
 		d.fail(w, http.StatusBadRequest, err)
 		return
 	}
-	mode := d.getCapabilities().ChargeControlMode
-	if !full && mode == compatibility.ChargeControlNative {
+	caps := d.getCapabilities()
+	mode := caps.ChargeControlMode
+	if !full && mode == compatibility.ChargeControlNative && !caps.NativeExactTargets {
 		d.fail(w, http.StatusConflict, ErrNativeChargeNow)
 		return
 	}
@@ -894,7 +873,8 @@ func (d *Daemon) startChargeOnceRequest(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// A successful API response requires the first enforcement pass to work.
-	if !d.maintainLoopForced() {
+	nativeErr := d.reapplyNativeChargeOnce(target)
+	if applied := d.maintainLoopForced(); !applied || nativeErr != nil {
 		conf.ClearChargeOnceTarget()
 		if err := conf.Save(); err != nil {
 			conf.SetChargeOnceTarget(target)
@@ -903,6 +883,9 @@ func (d *Daemon) startChargeOnceRequest(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		err := fmt.Errorf("failed to enforce one-time charge")
+		if nativeErr != nil {
+			err = fmt.Errorf("%w: %w", err, nativeErr)
+		}
 		if restoreErr := restoreNativeLimit(); restoreErr != nil {
 			err = fmt.Errorf("%w; failed to restore native limit: %v", err, restoreErr)
 		}

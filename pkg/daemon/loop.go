@@ -28,6 +28,7 @@ func (d *Daemon) runLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-d.loopRequested:
 		case <-time.After(d.loopInterval):
 		}
 	}
@@ -465,7 +466,8 @@ func (d *Daemon) maintainManagedChargeLimit() bool {
 		return d.maintainManagedChargeOnce(target)
 	}
 
-	mode := d.getCapabilities().ChargeControlMode
+	caps := d.getCapabilities()
+	mode := caps.ChargeControlMode
 	upper := d.conf.UpperLimit()
 	if upper >= 100 {
 		changed, err := d.ensureManagedChargeLimitDisabled()
@@ -486,9 +488,12 @@ func (d *Daemon) maintainManagedChargeLimit() bool {
 		slog.Error(fmt.Sprintf("failed to reconcile %s charge limit: %v", mode, err))
 		return false
 	}
-	if changed {
+	switch {
+	case changed && caps.NativeExactTargets:
+		slog.Debug("requested native charge target; registration may still be pending", "lower", lower, "upper", upper)
+	case changed:
 		slog.Info(fmt.Sprintf("reconciled %s charge limit", mode), "lower", lower, "upper", upper)
-	} else {
+	default:
 		logging.Trace(fmt.Sprintf("%s charge limit is correct", mode), "lower", lower, "upper", upper)
 	}
 	d.maintainedChargingInProgress = false
@@ -496,29 +501,35 @@ func (d *Daemon) maintainManagedChargeLimit() bool {
 }
 
 // maintainManagedChargeOnce temporarily overrides the Apple-managed charge
-// limit. Firmware supports a narrow band below the target; native macOS only
-// supports charging to full once by temporarily disabling its limit.
+// limit. Native exact targets are reapplied once on admission, then kept at the
+// same target during maintenance.
 func (d *Daemon) maintainManagedChargeOnce(target int) bool {
 	d.maintainedChargingInProgress = false
-	mode := d.getCapabilities().ChargeControlMode
+	caps := d.getCapabilities()
+	mode := caps.ChargeControlMode
 
-	if target < 100 && mode != compatibility.ChargeControlFirmware {
+	if target < 100 && mode != compatibility.ChargeControlFirmware && !caps.NativeExactTargets {
 		slog.Error("the native macOS backend cannot force a one-time charge below 100%")
 		return false
 	}
 
 	var changed bool
 	var err error
-	if target >= 100 {
+	switch {
+	case target >= 100:
 		changed, err = d.ensureManagedChargeLimitDisabled()
-	} else {
+	case caps.NativeExactTargets:
+		changed, err = d.ensureNativeChargeLimit(target)
+	default:
 		changed, err = d.ensureManagedChargeLimit(target-1, target)
 	}
 	if err != nil {
 		slog.Error(fmt.Sprintf("failed to reconcile %s charge limit for a one-time charge: %v", mode, err))
 		return false
 	}
-	if changed {
+	if changed && caps.NativeExactTargets {
+		slog.Debug("requested native one-time charge target; registration may still be pending", "target", target)
+	} else if changed {
 		slog.Info(fmt.Sprintf("reconciled %s charge limit for a one-time charge", mode), "target", target)
 	}
 	return true
