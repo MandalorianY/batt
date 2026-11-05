@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -118,21 +120,35 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Start pprof server if enabled
-	if pprofAddr != "" {
-		go func() {
-			slog.Info(fmt.Sprintf("Starting pprof server on %s", pprofAddr))
-			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
-				slog.Error("Failed to start pprof server", "error", err)
-			}
-		}()
-	}
-
 	cmd := NewCommand()
 	if err := cmd.Execute(); err != nil {
 		handleCmdError(err)
 		os.Exit(1)
 	}
+}
+
+func startProfiler(ctx context.Context, address string) error {
+	addr, err := net.ResolveTCPAddr("tcp", address)
+	if err != nil {
+		return fmt.Errorf("resolve pprof address: %w", err)
+	}
+	if !addr.IP.IsLoopback() {
+		return errors.New("pprof requires a loopback address such as 127.0.0.1:6060")
+	}
+	listener, err := net.ListenTCP("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen for pprof: %w", err)
+	}
+	server := &http.Server{ReadHeaderTimeout: 5 * time.Second}
+	stop := context.AfterFunc(ctx, func() { _ = server.Close() })
+	slog.Info("Starting pprof server", "address", listener.Addr())
+	go func() {
+		defer stop()
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("pprof server stopped", "error", err)
+		}
+	}()
+	return nil
 }
 
 func NewCommand() *cobra.Command {
@@ -177,6 +193,9 @@ Report issues: https://github.com/charlie0129/batt/issues`,
 				return fmt.Errorf("%s is not supported on this Mac", feature)
 			}
 
+			if pprofAddr != "" {
+				return startProfiler(selected.Context(), pprofAddr)
+			}
 			return nil
 		},
 	}
@@ -202,7 +221,7 @@ Report issues: https://github.com/charlie0129/batt/issues`,
 	globalFlags.StringVarP(&logLevel, "log-level", "l", logLevel, "log level (trace, debug, info, warn, error, fatal, panic)")
 	globalFlags.StringVar(&configPath, "config", configPath, "config file path")
 	globalFlags.StringVar(&unixSocketPath, "daemon-socket", unixSocketPath, "batt daemon unix socket path")
-	globalFlags.StringVar(&pprofAddr, "pprof", pprofAddr, "enable pprof HTTP server on the specified address (e.g., localhost:6060)")
+	globalFlags.StringVar(&pprofAddr, "pprof", pprofAddr, "enable pprof HTTP server on a loopback address (e.g., localhost:6060)")
 
 	for _, i := range commandGroups {
 		cmd.AddGroup(&cobra.Group{
