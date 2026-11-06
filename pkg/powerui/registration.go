@@ -3,6 +3,7 @@ package powerui
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
@@ -18,20 +19,54 @@ import (
 func (nativeBridge) Registrations() (targets []int, manual bool, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/usr/bin/pmset", "-g", "battlimit")
-	cmd.Env = append(os.Environ(), "LC_ALL=C")
-	output, err := cmd.Output()
+	output, err := registrationOutput(ctx, "/usr/bin/pmset", "-g", "battlimit")
 	if err != nil {
 		return nil, false, fmt.Errorf("read native charge registrations: %w", err)
 	}
 	return policyTargets(string(output))
 }
 
+const registrationOutputLimit = 64 * 1024
+
+func registrationOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	// Read directly to avoid the 32 KiB copy buffer used by Cmd.Output.
+	// Closing the pipe on cancellation also covers an inherited stdout.
+	stop := context.AfterFunc(ctx, func() { _ = stdout.Close() })
+	defer stop()
+	output, readErr := io.ReadAll(io.LimitReader(stdout, registrationOutputLimit+1))
+	if len(output) > registrationOutputLimit {
+		readErr = fmt.Errorf("battery-limit output exceeded %d bytes", registrationOutputLimit)
+	}
+	if readErr != nil {
+		_ = cmd.Process.Kill()
+	}
+	waitErr := cmd.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if readErr != nil {
+		return nil, readErr
+	}
+	if waitErr != nil {
+		return nil, waitErr
+	}
+	return output, nil
+}
+
 var registrationRow = regexp.MustCompile(`\{[^{}]*\}`)
 
 func policyTargets(output string) (targets []int, manual bool, err error) {
 	invalid := fmt.Errorf("unrecognized pmset battery-limit output; registration cannot be confirmed")
-	if len(output) > 64*1024 {
+	if len(output) > registrationOutputLimit {
 		return nil, false, invalid
 	}
 	output = strings.TrimSpace(output)

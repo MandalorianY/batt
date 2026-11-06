@@ -1,9 +1,14 @@
 package powerui
 
 import (
+	"context"
+	"errors"
+	"os/exec"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const ceilingRegistration = `Battery level limits:
@@ -19,6 +24,43 @@ const ceilingRegistration = `Battery level limits:
     }
 )
 `
+
+func TestRegistrationOutputLimit(t *testing.T) {
+	for _, size := range []int{registrationOutputLimit, registrationOutputLimit + 1} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			output, err := registrationOutput(ctx, "/usr/bin/head", "-c", strconv.Itoa(size), "/dev/zero")
+			if size > registrationOutputLimit {
+				if err == nil || !strings.Contains(err.Error(), "output exceeded") || output != nil {
+					t.Fatalf("oversized output returned %d bytes and error %v", len(output), err)
+				}
+			} else if err != nil || len(output) != size {
+				t.Fatalf("output at limit returned %d bytes and error %v", len(output), err)
+			}
+		})
+	}
+}
+
+func TestRegistrationOutputRejectsCommandFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	output, err := registrationOutput(ctx, "/bin/sh", "-c", "printf 'No battery level limits set\\n'; exit 3")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 3 || output != nil {
+		t.Fatalf("failed command returned %q and error %v", output, err)
+	}
+}
+
+func TestRegistrationOutputTimeoutClosesInheritedPipe(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	output, err := registrationOutput(ctx, "/bin/sh", "-c", "/bin/sleep 3 &")
+	if !errors.Is(err, context.DeadlineExceeded) || output != nil || time.Since(start) >= 2*time.Second {
+		t.Fatalf("timed-out read returned %q after %s with error %v", output, time.Since(start), err)
+	}
+}
 
 func TestPolicyRegistration(t *testing.T) {
 	row := registrationRow.FindString(ceilingRegistration)
